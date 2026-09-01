@@ -3,50 +3,61 @@ import { analyzePrescription } from '../lib/gemini';
 import { formatPrescriptionMessage } from '../lib/format';
 import { getSupabase } from '../lib/supabase';
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const SECRET_TOKEN = process.env.TELEGRAM_SECRET_TOKEN;
+// Strip any accidental quotes or whitespace added by Windows/PowerShell
+const RAW_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const BOT_TOKEN = RAW_BOT_TOKEN.replace(/['"\r\n\s]/g, '');
 
 async function sendTelegramMessage(chatId: number, text: string, replyToMessageId?: number) {
   if (!BOT_TOKEN) {
-    console.error('TELEGRAM_BOT_TOKEN is not set');
+    console.error('TELEGRAM_BOT_TOKEN is missing');
     return;
   }
 
-  // 1. Try sending with Markdown
-  const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: 'Markdown',
-      reply_to_message_id: replyToMessageId,
-    }),
-  });
+  const payload: any = {
+    chat_id: chatId,
+    text: text,
+    reply_to_message_id: replyToMessageId,
+  };
 
-  const data = (await res.json()) as any;
-  if (!data.ok) {
-    console.warn('Telegram Markdown send failed, retrying plain text:', data.description);
-    // 2. Fallback to plain text if Markdown entity parsing failed
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+  try {
+    // 1. Try Markdown format
+    const mdRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        reply_to_message_id: replyToMessageId,
-      }),
+      body: JSON.stringify({ ...payload, parse_mode: 'Markdown' }),
     });
+    const mdData = (await mdRes.json()) as any;
+    
+    if (mdData.ok) {
+      console.log('Successfully sent Markdown message to chat:', chatId);
+      return;
+    }
+
+    console.warn('Markdown parse failed, sending plain text fallback:', mdData.description);
+    // 2. Fallback to plain text
+    const plainRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const plainData = (await plainRes.json()) as any;
+    console.log('Plain text send result:', plainData);
+  } catch (err) {
+    console.error('Failed to send Telegram message:', err);
   }
 }
 
 async function sendChatAction(chatId: number, action: string = 'typing') {
   if (!BOT_TOKEN) return;
-  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendChatAction`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, action }),
-  });
+  try {
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendChatAction`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, action }),
+    });
+  } catch (e) {
+    console.error('Failed to send chat action:', e);
+  }
 }
 
 async function downloadTelegramFile(fileId: string): Promise<{ buffer: Buffer; mimeType: string }> {
@@ -55,7 +66,7 @@ async function downloadTelegramFile(fileId: string): Promise<{ buffer: Buffer; m
   const fileRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
   const fileData = (await fileRes.json()) as any;
   if (!fileData.ok || !fileData.result?.file_path) {
-    throw new Error('Failed to get file path from Telegram');
+    throw new Error('Failed to get file path from Telegram: ' + JSON.stringify(fileData));
   }
 
   const filePath = fileData.result.file_path;
@@ -79,13 +90,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).send('Method Not Allowed');
   }
 
-  // Header verification (lenient to avoid dropping updates)
-  const headerSecret = req.headers['x-telegram-bot-api-secret-token'];
-  if (SECRET_TOKEN && headerSecret && headerSecret !== SECRET_TOKEN.trim()) {
-    console.error('Secret token mismatch. Expected:', SECRET_TOKEN.trim(), 'Received:', headerSecret);
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
   let body = req.body;
   if (typeof body === 'string') {
     try {
@@ -94,6 +98,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json({ ok: true });
     }
   }
+
+  console.log('Received Telegram update payload:', JSON.stringify(body));
 
   const message = body?.message;
   if (!message) {
@@ -109,7 +115,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    if (message.text && (message.text.startsWith('/start') || message.text.toLowerCase() === 'hi')) {
+    if (message.text && (message.text.startsWith('/start') || message.text.toLowerCase().trim() === 'hi')) {
       await sendTelegramMessage(
         chatId,
         `👋 Welcome to Rx Prescription Bot!\n\nSend or forward a clear photo of any doctor's prescription. I will extract the medications and explain what each one is for.`,

@@ -18,7 +18,9 @@ export interface PrescriptionAnalysis {
 }
 
 export async function analyzePrescription(imageBuffer: Buffer, mimeType: string): Promise<PrescriptionAnalysis> {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const rawApiKey = process.env.GEMINI_API_KEY || '';
+  const apiKey = rawApiKey.replace(/['"\r\n\s]/g, '');
+
   if (!apiKey) {
     throw new Error('GEMINI_API_KEY is not configured');
   }
