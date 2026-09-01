@@ -1,12 +1,13 @@
-﻿import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { analyzePrescription } from '../lib/gemini';
 import { formatPrescriptionMessage } from '../lib/format';
-import { supabase } from '../lib/supabase';
+import { getSupabase } from '../lib/supabase';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const SECRET_TOKEN = process.env.TELEGRAM_SECRET_TOKEN;
 
 async function sendTelegramMessage(chatId: number, text: string, replyToMessageId?: number) {
+  if (!BOT_TOKEN) return;
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -20,6 +21,7 @@ async function sendTelegramMessage(chatId: number, text: string, replyToMessageI
 }
 
 async function sendChatAction(chatId: number, action: string = 'typing') {
+  if (!BOT_TOKEN) return;
   await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendChatAction`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -28,9 +30,11 @@ async function sendChatAction(chatId: number, action: string = 'typing') {
 }
 
 async function downloadTelegramFile(fileId: string): Promise<{ buffer: Buffer; mimeType: string }> {
+  if (!BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN is missing');
+  
   const fileRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
   const fileData = (await fileRes.json()) as any;
-  if (!fileData.ok || !fileData.result.file_path) {
+  if (!fileData.ok || !fileData.result?.file_path) {
     throw new Error('Failed to get file path from Telegram');
   }
 
@@ -51,19 +55,31 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(200).send('Rx Bot Webhook is running');
   }
 
-  if (SECRET_TOKEN && req.headers['x-telegram-bot-api-secret-token'] !== SECRET_TOKEN) {
+  if (SECRET_TOKEN && req.headers['x-telegram-bot-api-secret-token'] && req.headers['x-telegram-bot-api-secret-token'] !== SECRET_TOKEN) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  const update = req.body;
-  if (!update || !update.message) {
+  let body = req.body;
+  if (typeof body === 'string') {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      return res.status(200).json({ ok: true });
+    }
+  }
+
+  const message = body?.message;
+  if (!message) {
     return res.status(200).json({ ok: true });
   }
 
-  const message = update.message;
-  const chatId = message.chat.id;
+  const chatId = message.chat?.id;
   const userId = message.from?.id || chatId;
   const messageId = message.message_id;
+
+  if (!chatId) {
+    return res.status(200).json({ ok: true });
+  }
 
   try {
     if (message.text && message.text.startsWith('/start')) {
@@ -100,20 +116,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const analysis = await analyzePrescription(buffer, mimeType);
     const formattedText = formatPrescriptionMessage(analysis);
 
-    if (process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY) {
-      await supabase.from('prescriptions').insert({
-        telegram_user_id: userId,
-        telegram_chat_id: chatId,
-        message_id: messageId,
-        raw_data: analysis,
-        summary: formattedText,
-      });
+    const supabase = getSupabase();
+    if (supabase) {
+      try {
+        await supabase.from('prescriptions').insert({
+          telegram_user_id: userId,
+          telegram_chat_id: chatId,
+          message_id: messageId,
+          raw_data: analysis,
+          summary: formattedText,
+        });
+      } catch (dbErr) {
+        console.error('Supabase write error:', dbErr);
+      }
     }
 
     await sendTelegramMessage(chatId, formattedText, messageId);
     return res.status(200).json({ ok: true });
   } catch (error: any) {
-    console.error('Webhook error:', error);
+    console.error('Webhook processing error:', error);
     await sendTelegramMessage(
       chatId,
       `❌ *Error:* Could not read the prescription. Please ensure the photo is clear and try again.`,

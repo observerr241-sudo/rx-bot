@@ -1,7 +1,4 @@
-﻿import { GoogleGenerativeAI } from '@google/generative-ai';
-
-const apiKey = process.env.GEMINI_API_KEY || '';
-const genAI = new GoogleGenerativeAI(apiKey);
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 export interface MedicineDetail {
   brand_name: string;
@@ -21,6 +18,12 @@ export interface PrescriptionAnalysis {
 }
 
 export async function analyzePrescription(imageBuffer: Buffer, mimeType: string): Promise<PrescriptionAnalysis> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY is not configured');
+  }
+
+  const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({
     model: 'gemini-1.5-flash',
     generationConfig: {
