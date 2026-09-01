@@ -3,13 +3,12 @@ import { analyzePrescription } from '../lib/gemini';
 import { formatPrescriptionMessage } from '../lib/format';
 import { getSupabase } from '../lib/supabase';
 
-// Strip any accidental quotes or whitespace added by Windows/PowerShell
 const RAW_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const BOT_TOKEN = RAW_BOT_TOKEN.replace(/['"\r\n\s]/g, '');
 
 async function sendTelegramMessage(chatId: number, text: string, replyToMessageId?: number) {
   if (!BOT_TOKEN) {
-    console.error('TELEGRAM_BOT_TOKEN is missing');
+    console.error('CRITICAL: TELEGRAM_BOT_TOKEN is not set in Vercel environment');
     return;
   }
 
@@ -20,7 +19,6 @@ async function sendTelegramMessage(chatId: number, text: string, replyToMessageI
   };
 
   try {
-    // 1. Try Markdown format
     const mdRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -28,22 +26,16 @@ async function sendTelegramMessage(chatId: number, text: string, replyToMessageI
     });
     const mdData = (await mdRes.json()) as any;
     
-    if (mdData.ok) {
-      console.log('Successfully sent Markdown message to chat:', chatId);
-      return;
+    if (!mdData.ok) {
+      console.warn('Markdown failed, sending plain text:', mdData.description);
+      await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
     }
-
-    console.warn('Markdown parse failed, sending plain text fallback:', mdData.description);
-    // 2. Fallback to plain text
-    const plainRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    const plainData = (await plainRes.json()) as any;
-    console.log('Plain text send result:', plainData);
   } catch (err) {
-    console.error('Failed to send Telegram message:', err);
+    console.error('Network error calling Telegram API:', err);
   }
 }
 
@@ -56,7 +48,7 @@ async function sendChatAction(chatId: number, action: string = 'typing') {
       body: JSON.stringify({ chat_id: chatId, action }),
     });
   } catch (e) {
-    console.error('Failed to send chat action:', e);
+    console.error('Chat action error:', e);
   }
 }
 
@@ -82,8 +74,17 @@ async function downloadTelegramFile(fileId: string): Promise<{ buffer: Buffer; m
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  // Diagnostic health check
   if (req.method === 'GET') {
-    return res.status(200).send('Rx Prescription Bot webhook is healthy and running.');
+    return res.status(200).json({
+      status: 'healthy',
+      env_checks: {
+        TELEGRAM_BOT_TOKEN_SET: Boolean(BOT_TOKEN && BOT_TOKEN.length > 10),
+        GEMINI_API_KEY_SET: Boolean(process.env.GEMINI_API_KEY),
+        SUPABASE_URL_SET: Boolean(process.env.SUPABASE_URL),
+        SUPABASE_ANON_KEY_SET: Boolean(process.env.SUPABASE_ANON_KEY),
+      }
+    });
   }
 
   if (req.method !== 'POST') {
@@ -98,8 +99,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json({ ok: true });
     }
   }
-
-  console.log('Received Telegram update payload:', JSON.stringify(body));
 
   const message = body?.message;
   if (!message) {
