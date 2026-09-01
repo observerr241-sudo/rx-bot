@@ -7,8 +7,13 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const SECRET_TOKEN = process.env.TELEGRAM_SECRET_TOKEN;
 
 async function sendTelegramMessage(chatId: number, text: string, replyToMessageId?: number) {
-  if (!BOT_TOKEN) return;
-  await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+  if (!BOT_TOKEN) {
+    console.error('TELEGRAM_BOT_TOKEN is not set');
+    return;
+  }
+
+  // 1. Try sending with Markdown
+  const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -18,6 +23,21 @@ async function sendTelegramMessage(chatId: number, text: string, replyToMessageI
       reply_to_message_id: replyToMessageId,
     }),
   });
+
+  const data = (await res.json()) as any;
+  if (!data.ok) {
+    console.warn('Telegram Markdown send failed, retrying plain text:', data.description);
+    // 2. Fallback to plain text if Markdown entity parsing failed
+    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        reply_to_message_id: replyToMessageId,
+      }),
+    });
+  }
 }
 
 async function sendChatAction(chatId: number, action: string = 'typing') {
@@ -51,11 +71,18 @@ async function downloadTelegramFile(fileId: string): Promise<{ buffer: Buffer; m
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== 'POST') {
-    return res.status(200).send('Rx Bot Webhook is running');
+  if (req.method === 'GET') {
+    return res.status(200).send('Rx Prescription Bot webhook is healthy and running.');
   }
 
-  if (SECRET_TOKEN && req.headers['x-telegram-bot-api-secret-token'] && req.headers['x-telegram-bot-api-secret-token'] !== SECRET_TOKEN) {
+  if (req.method !== 'POST') {
+    return res.status(405).send('Method Not Allowed');
+  }
+
+  // Header verification (lenient to avoid dropping updates)
+  const headerSecret = req.headers['x-telegram-bot-api-secret-token'];
+  if (SECRET_TOKEN && headerSecret && headerSecret !== SECRET_TOKEN.trim()) {
+    console.error('Secret token mismatch. Expected:', SECRET_TOKEN.trim(), 'Received:', headerSecret);
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
@@ -82,10 +109,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    if (message.text && message.text.startsWith('/start')) {
+    if (message.text && (message.text.startsWith('/start') || message.text.toLowerCase() === 'hi')) {
       await sendTelegramMessage(
         chatId,
-        `👋 *Welcome to Rx Prescription Bot!*\n\nSend or forward a clear photo of any doctor's prescription. I will extract the medications and explain what each one is for.`,
+        `👋 Welcome to Rx Prescription Bot!\n\nSend or forward a clear photo of any doctor's prescription. I will extract the medications and explain what each one is for.`,
         messageId
       );
       return res.status(200).json({ ok: true });
@@ -137,7 +164,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     console.error('Webhook processing error:', error);
     await sendTelegramMessage(
       chatId,
-      `❌ *Error:* Could not read the prescription. Please ensure the photo is clear and try again.`,
+      `❌ Error: Could not read the prescription. Please ensure the photo is clear and try again.`,
       messageId
     );
     return res.status(200).json({ ok: true, error: error.message });
