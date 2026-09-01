@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "rx-bot",
   "version": "1.0.0",
   "description": "Telegram Prescription Bot using Gemini and Supabase on Vercel",
